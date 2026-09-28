@@ -326,7 +326,11 @@ describe('QueuePage', () => {
             ams: [
               {
                 id: 0,
+                // Regular AMS units expose four tray records. Keeping all four
+                // here matters because buildLoadedFilaments distinguishes a
+                // regular AMS from a single-slot AMS-HT by tray count.
                 tray: [
+                  { id: 0, tray_type: null },
                   {
                     id: 1,
                     tray_type: 'PLA',
@@ -335,6 +339,8 @@ describe('QueuePage', () => {
                     tray_info_idx: 'GFA00',
                     remain: 80,
                   },
+                  { id: 2, tray_type: null },
+                  { id: 3, tray_type: null },
                 ],
               },
             ],
