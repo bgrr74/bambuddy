@@ -69,7 +69,7 @@ import { PipelineRunsView } from './PipelineRunsPage';
 import { type TimeFormat, formatETA, formatDuration, formatRelativeTime, parseUTCDate } from '../utils/date';
 import { getBedTypeInfo } from '../utils/bedType';
 import { getColorName } from '../utils/colors';
-import type { PrintQueueItem, PrintQueueBulkUpdate, Permission, CalibrationMode } from '../api/client';
+import type { PrintQueueItem, PrintQueueBulkUpdate, Permission, CalibrationMode, SlotSpoolIdentity } from '../api/client';
 import type { PlateMetadata } from '../types/plates';
 import { Card } from '../components/Card';
 import { FilamentSwatch } from '../components/FilamentSwatch';
@@ -83,12 +83,18 @@ import { CompactHistoryRow } from '../components/CompactHistoryRow';
 import { QueueTimelineView } from '../components/QueueTimelineView';
 import { compareQueueOrder, compareQueueOrderAcrossLanes } from '../utils/queueOrder';
 import { BatchOrdersView } from '../components/BatchOrdersView';
+import { buildLoadedFilaments, type LoadedFilament } from '../hooks/useFilamentMapping';
 
 type QueueFilamentDisplay = {
   slotId: number;
   type: string;
   color: string;
   colorName: string;
+  slotLabel?: string;
+  spoolName?: string;
+  extraColors?: string;
+  effectType?: string;
+  subtype?: string;
 };
 
 /**
@@ -102,7 +108,26 @@ type QueueFilamentDisplay = {
 function resolveQueueFilaments(
   item: PrintQueueItem,
   plates: PlateMetadata[],
+  loadedFilaments: LoadedFilament[] = [],
 ): QueueFilamentDisplay[] {
+  const loadedForSlot = (slotId: number): LoadedFilament | undefined => {
+    const mappedTrayId = slotId > 0 ? item.ams_mapping?.[slotId - 1] : undefined;
+    if (mappedTrayId == null || mappedTrayId < 0) return undefined;
+    return loadedFilaments.find((filament) => filament.globalTrayId === mappedTrayId);
+  };
+
+  const fromLoaded = (slotId: number, loaded: LoadedFilament): QueueFilamentDisplay => ({
+    slotId,
+    type: loaded.type,
+    color: loaded.color,
+    colorName: loaded.colorName,
+    slotLabel: loaded.label,
+    spoolName: loaded.spoolName,
+    extraColors: loaded.extraColors,
+    effectType: loaded.effectType,
+    subtype: loaded.spoolSubtype,
+  });
+
   const selectedPlate =
     item.plate_id != null
       ? plates.find((plate) => plate.index === item.plate_id)
@@ -116,6 +141,12 @@ function resolveQueueFilaments(
     return selectedPlate.filaments
       .filter((filament) => filament.used_in_plate !== false && filament.used_grams > 0)
       .map((filament) => {
+        // A stored AMS mapping names the physical tray that will actually feed
+        // this 3MF slot. Once its live tray data is available, that is more
+        // specific than either the queue override or the original slice.
+        const loaded = loadedForSlot(filament.slot_id);
+        if (loaded) return fromLoaded(filament.slot_id, loaded);
+
         const override = overrides.get(filament.slot_id);
         const color = override?.color ?? filament.color;
         const type = override?.type ?? filament.type;
@@ -130,21 +161,27 @@ function resolveQueueFilaments(
   }
 
   // The queue row can render before plate metadata arrives (or an old source
-  // may no longer expose it). Prefer explicit queue overrides in that gap,
-  // because they describe the user's intended colour rather than the slice.
+  // may no longer expose it). Prefer a resolved physical tray when possible,
+  // then explicit queue overrides because they describe the user's intention.
   if (item.filament_overrides?.length) {
-    return item.filament_overrides.map((override) => ({
-      slotId: override.slot_id,
-      type: override.type,
-      color: override.color,
-      colorName:
-        override.color_name?.trim() ||
-        getColorName(override.color, override.type),
-    }));
+    return item.filament_overrides.map((override) => {
+      const loaded = loadedForSlot(override.slot_id);
+      if (loaded) return fromLoaded(override.slot_id, loaded);
+      return {
+        slotId: override.slot_id,
+        type: override.type,
+        color: override.color,
+        colorName:
+          override.color_name?.trim() ||
+          getColorName(override.color, override.type),
+      };
+    });
   }
 
   // Last-resort compatibility fallback for older/simpler queue responses.
   if (item.filament_color) {
+    const loaded = loadedForSlot(1);
+    if (loaded) return [fromLoaded(1, loaded)];
     return [
       {
         slotId: 1,
@@ -480,13 +517,45 @@ function SortableQueueItem({
   etaNow?: number;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
-  // Fetch printer status every 30 seconds while printing to monitor progress
+  const hasPhysicalAmsMapping =
+    item.printer_id != null && (item.ams_mapping?.some((trayId) => trayId >= 0) ?? false);
+
+  // Printing rows already need live status for progress. A queued item with a
+  // stored AMS mapping also needs it so the card can turn global tray ids into
+  // the actual slot / colour that will feed the print (#3132). React Query
+  // deduplicates rows sharing a printer.
   const { data: status } = useQuery({
     queryKey: ['printerStatus', item.printer_id],
     queryFn: () => api.getPrinterStatus(item.printer_id!),
-    refetchInterval: 30000,
-    enabled: item.printer_id != null && printerState === 'printing',
+    refetchInterval: printerState === 'printing' ? 30000 : false,
+    enabled: item.printer_id != null && (printerState === 'printing' || hasPhysicalAmsMapping),
   });
+
+  // Inventory identity is display-only: printer telemetry knows the tray colour
+  // and material but not that a third-party spool is e.g. "eSUN PLA Basic".
+  // Reuse the same payload / key as PrintModal so a mapped queue row names the
+  // physical spool consistently with the mapping picker.
+  const { data: inventoryRemain } = useQuery({
+    queryKey: ['printer-inventory-remain', item.printer_id],
+    queryFn: () => api.getInventoryRemain(item.printer_id!),
+    enabled: hasPhysicalAmsMapping,
+    staleTime: 30 * 1000,
+  });
+
+  const slotSpools = useMemo(() => {
+    const slots = inventoryRemain?.slot_materials;
+    if (!slots?.length) return undefined;
+    const map = new Map<number, SlotSpoolIdentity>();
+    slots.forEach((slot) => {
+      if (slot.spool) map.set(slot.global_tray_id, slot.spool);
+    });
+    return map.size > 0 ? map : undefined;
+  }, [inventoryRemain]);
+
+  const loadedFilaments = useMemo(
+    () => buildLoadedFilaments(status, slotSpools),
+    [status, slotSpools],
+  );
 
   // Determine if we're printing a library file
   const isLibraryFile = !!item.library_file_id && !item.archive_id;
@@ -509,7 +578,7 @@ function SortableQueueItem({
   // Combine plates data from either source
   const platesData = isLibraryFile ? libraryPlatesData : archivePlatesData;
   const plates = platesData?.plates ?? [];
-  const queueFilaments = resolveQueueFilaments(item, plates);
+  const queueFilaments = resolveQueueFilaments(item, plates, loadedFilaments);
 
   const canReorder = hasPermission('queue:reorder');
   const {
@@ -735,22 +804,34 @@ function SortableQueueItem({
                 {formatWeight(item.filament_used_grams)}
               </span>
             )}
-            {queueFilaments.map((filament) => (
-              <span
-                key={`filament-${filament.slotId}`}
-                className="flex items-center gap-1 sm:gap-1.5 min-w-0"
-                title={filament.type ? `${filament.type} · ${filament.colorName}` : filament.colorName}
-              >
-                <FilamentSwatch
-                  rgba={filament.color}
-                  className="w-3 h-3 sm:w-3.5 sm:h-3.5"
-                  effectSize="table"
-                />
-                <span className="truncate max-w-[110px] sm:max-w-[160px]">
-                  {filament.colorName}
+            {queueFilaments.map((filament) => {
+              const mappedLabel = filament.slotLabel
+                ? [
+                    filament.slotLabel,
+                    filament.spoolName || filament.type,
+                    filament.colorName,
+                  ].filter(Boolean).join(' · ')
+                : filament.colorName;
+              return (
+                <span
+                  key={`filament-${filament.slotId}`}
+                  className="flex items-center gap-1 sm:gap-1.5 min-w-0"
+                  title={mappedLabel}
+                >
+                  <FilamentSwatch
+                    rgba={filament.color}
+                    extraColors={filament.extraColors}
+                    effectType={filament.effectType}
+                    subtype={filament.subtype}
+                    className="w-3 h-3 sm:w-3.5 sm:h-3.5"
+                    effectSize="table"
+                  />
+                  <span className="truncate max-w-[110px] sm:max-w-[260px]">
+                    {mappedLabel}
+                  </span>
                 </span>
-              </span>
-            ))}
+              );
+            })}
             {(() => {
               // Build plate badge so the user knows which plate to mount before
               // walking to the printer (#1281). Hidden when the 3MF doesn't
