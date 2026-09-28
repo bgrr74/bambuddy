@@ -197,6 +197,206 @@ describe('QueuePage', () => {
       });
     });
 
+    it('shows the queue override colour instead of the original 3MF colour (#3132)', async () => {
+      const item = {
+        ...mockQueueItems[0],
+        id: 82,
+        printer_id: null,
+        target_model: 'P2S',
+        archive_id: null,
+        library_file_id: 13,
+        archive_name: null,
+        library_file_name: 'Override colour test',
+        plate_id: 1,
+        filament_used_grams: 23.66,
+        filament_type: 'PLA',
+        filament_color: '#7C4B00',
+        filament_overrides: [
+          {
+            slot_id: 1,
+            type: 'PLA',
+            color: '#C2BAA7FF',
+            color_name: 'Bone White',
+            force_color_match: false,
+          },
+        ],
+      };
+
+      server.use(
+        http.get('/api/v1/queue/', () => HttpResponse.json([item])),
+        http.get('/api/v1/library/files/13/plates', () =>
+          HttpResponse.json({
+            file_id: 13,
+            filename: 'override-colour.3mf',
+            plates: [
+              {
+                index: 1,
+                name: 'Plate 1',
+                objects: ['Part'],
+                has_thumbnail: false,
+                thumbnail_url: null,
+                print_time_seconds: 3095,
+                filament_used_grams: 23.66,
+                filaments: [
+                  {
+                    slot_id: 1,
+                    type: 'PLA',
+                    color: '#7C4B00',
+                    used_grams: 23.7,
+                    used_meters: 7.93,
+                  },
+                ],
+              },
+            ],
+            is_multi_plate: false,
+          }),
+        ),
+      );
+
+      render(<QueuePage />);
+
+      const colourName = await screen.findByText('Bone White');
+      const row = colourName.closest('.group');
+
+      expect(row).not.toBeNull();
+      expect(within(row as HTMLElement).getByTestId('filament-swatch')).toHaveAttribute(
+        'title',
+        '#C2BAA7',
+      );
+    });
+
+    it('falls back to the selected plate 3MF colour when there is no override (#3132)', async () => {
+      const item = {
+        ...mockQueueItems[0],
+        id: 83,
+        printer_id: null,
+        target_model: 'P2S',
+        archive_id: null,
+        library_file_id: 14,
+        archive_name: null,
+        library_file_name: 'Original colour test',
+        plate_id: 1,
+        filament_color: '#FFFFFF',
+        filament_overrides: null,
+      };
+
+      server.use(
+        http.get('/api/v1/queue/', () => HttpResponse.json([item])),
+        http.get('/api/v1/library/files/14/plates', () =>
+          HttpResponse.json({
+            file_id: 14,
+            filename: 'original-colour.3mf',
+            plates: [
+              {
+                index: 1,
+                name: 'Plate 1',
+                objects: ['Part'],
+                has_thumbnail: false,
+                thumbnail_url: null,
+                print_time_seconds: 3600,
+                filament_used_grams: 20,
+                filaments: [
+                  {
+                    slot_id: 1,
+                    type: 'PLA',
+                    color: '#7C4B00',
+                    used_grams: 20,
+                    used_meters: 6.7,
+                  },
+                ],
+              },
+            ],
+            is_multi_plate: false,
+          }),
+        ),
+      );
+
+      render(<QueuePage />);
+
+      await screen.findByText('Original colour test');
+      const row = screen.getByText('Original colour test').closest('.group');
+
+      expect(row).not.toBeNull();
+      expect(await within(row as HTMLElement).findByTestId('filament-swatch')).toHaveAttribute(
+        'title',
+        '#7C4B00',
+      );
+    });
+
+    it('shows all used plate colours and only overrides the matching slot (#3132)', async () => {
+      const item = {
+        ...mockQueueItems[0],
+        id: 84,
+        printer_id: null,
+        target_model: 'P2S',
+        archive_id: null,
+        library_file_id: 15,
+        archive_name: null,
+        library_file_name: 'Multi colour test',
+        plate_id: 1,
+        filament_overrides: [
+          {
+            slot_id: 2,
+            type: 'PLA',
+            color: '#C2BAA7FF',
+            color_name: 'Bone White',
+            force_color_match: false,
+          },
+        ],
+      };
+
+      server.use(
+        http.get('/api/v1/queue/', () => HttpResponse.json([item])),
+        http.get('/api/v1/library/files/15/plates', () =>
+          HttpResponse.json({
+            file_id: 15,
+            filename: 'multi-colour.3mf',
+            plates: [
+              {
+                index: 1,
+                name: 'Plate 1',
+                objects: ['Part'],
+                has_thumbnail: false,
+                thumbnail_url: null,
+                print_time_seconds: 3600,
+                filament_used_grams: 30,
+                filaments: [
+                  {
+                    slot_id: 1,
+                    type: 'PLA',
+                    color: '#000000',
+                    used_grams: 20,
+                    used_meters: 6.7,
+                  },
+                  {
+                    slot_id: 2,
+                    type: 'PLA',
+                    color: '#7C4B00',
+                    used_grams: 10,
+                    used_meters: 3.35,
+                  },
+                ],
+              },
+            ],
+            is_multi_plate: false,
+          }),
+        ),
+      );
+
+      render(<QueuePage />);
+
+      const overrideName = await screen.findByText('Bone White');
+      const row = overrideName.closest('.group');
+
+      expect(row).not.toBeNull();
+      const swatches = within(row as HTMLElement).getAllByTestId('filament-swatch');
+      expect(swatches).toHaveLength(2);
+      expect(swatches.map((swatch) => swatch.getAttribute('title'))).toEqual([
+        '#000000',
+        '#C2BAA7',
+      ]);
+    });
+
     it('shows one if-started-now ETA for an eligible pending item', async () => {
       // Printer 1 is free: nothing is printing on it and nothing is queued ahead.
       server.use(
