@@ -387,6 +387,116 @@ describe('QueuePage', () => {
       expect(within(row as HTMLElement).queryByText('Caramel')).not.toBeInTheDocument();
     });
 
+    it('resolves a mapped tray on a second regular AMS unit (#3132)', async () => {
+      const item = {
+        ...mockQueueItems[0],
+        id: 86,
+        printer_id: 1,
+        printer_name: 'Test Printer',
+        archive_id: null,
+        library_file_id: 17,
+        archive_name: null,
+        library_file_name: 'Second AMS mapping test',
+        plate_id: 1,
+        ams_mapping: [5],
+        filament_overrides: null,
+      };
+
+      server.use(
+        http.get('/api/v1/queue/', () => HttpResponse.json([item])),
+        http.get('/api/v1/library/files/17/plates', () =>
+          HttpResponse.json({
+            file_id: 17,
+            filename: 'second-ams.3mf',
+            plates: [
+              {
+                index: 1,
+                name: 'Plate 1',
+                objects: ['Part'],
+                has_thumbnail: false,
+                thumbnail_url: null,
+                print_time_seconds: 3600,
+                filament_used_grams: 20,
+                filaments: [
+                  {
+                    slot_id: 1,
+                    type: 'PLA',
+                    color: '#111111',
+                    used_grams: 20,
+                    used_meters: 6.7,
+                  },
+                ],
+              },
+            ],
+            is_multi_plate: false,
+          }),
+        ),
+        http.get('/api/v1/printers/:id/status', () =>
+          HttpResponse.json({
+            id: 1,
+            name: 'Test Printer',
+            connected: true,
+            state: 'IDLE',
+            ams: [
+              {
+                id: 1,
+                tray: [
+                  { id: 0, tray_type: null },
+                  {
+                    id: 1,
+                    tray_type: 'PLA',
+                    tray_color: 'C2BAA7FF',
+                    tray_sub_brands: 'PLA Basic',
+                    tray_info_idx: 'GFA00',
+                    remain: 80,
+                  },
+                  { id: 2, tray_type: null },
+                  { id: 3, tray_type: null },
+                ],
+              },
+            ],
+            vt_tray: [],
+            nozzles: [],
+            ams_extruder_map: {},
+          }),
+        ),
+        http.get('/api/v1/printers/:id/inventory-remain', () =>
+          HttpResponse.json({
+            inventory_remain_g: { '5': 800 },
+            slot_materials: [
+              {
+                ams_id: 1,
+                tray_id: 1,
+                global_tray_id: 5,
+                material_key: 'PLA|basic|bone-white',
+                remaining_g: 800,
+                extruder: 0,
+                spool: {
+                  brand: 'eSUN',
+                  material: 'PLA',
+                  subtype: 'Basic',
+                  color_name: 'Bone White',
+                  rgba: 'C2BAA7FF',
+                },
+              },
+            ],
+          }),
+        ),
+      );
+
+      render(<QueuePage />);
+
+      const name = await screen.findByText('Second AMS mapping test');
+      const row = name.closest('.group');
+      expect(row).not.toBeNull();
+
+      await waitFor(() => {
+        expect(
+          within(row as HTMLElement).getByText('B2 · eSUN PLA Basic · Bone White'),
+        ).toBeInTheDocument();
+      });
+    });
+
     it('falls back to the selected plate 3MF colour when there is no override (#3132)', async () => {
       const item = {
         ...mockQueueItems[0],
