@@ -317,10 +317,12 @@ describe('QueuePage', () => {
       const row = screen.getByText('Original colour test').closest('.group');
 
       expect(row).not.toBeNull();
-      expect(await within(row as HTMLElement).findByTestId('filament-swatch')).toHaveAttribute(
-        'title',
-        '#7C4B00',
-      );
+      await waitFor(() => {
+        expect(within(row as HTMLElement).getByTestId('filament-swatch')).toHaveAttribute(
+          'title',
+          '#7C4B00',
+        );
+      });
     });
 
     it('shows all used plate colours and only overrides the matching slot (#3132)', async () => {
@@ -389,12 +391,14 @@ describe('QueuePage', () => {
       const row = overrideName.closest('.group');
 
       expect(row).not.toBeNull();
-      const swatches = within(row as HTMLElement).getAllByTestId('filament-swatch');
-      expect(swatches).toHaveLength(2);
-      expect(swatches.map((swatch) => swatch.getAttribute('title'))).toEqual([
-        '#000000',
-        '#C2BAA7',
-      ]);
+      await waitFor(() => {
+        const swatches = within(row as HTMLElement).getAllByTestId('filament-swatch');
+        expect(swatches).toHaveLength(2);
+        expect(swatches.map((swatch) => swatch.getAttribute('title'))).toEqual([
+          '#000000',
+          '#C2BAA7',
+        ]);
+      });
     });
 
     it('shows one if-started-now ETA for an eligible pending item', async () => {
