@@ -68,8 +68,11 @@ import { api, ApiError } from '../api/client';
 import { PipelineRunsView } from './PipelineRunsPage';
 import { type TimeFormat, formatETA, formatDuration, formatRelativeTime, parseUTCDate } from '../utils/date';
 import { getBedTypeInfo } from '../utils/bedType';
+import { getColorName } from '../utils/colors';
 import type { PrintQueueItem, PrintQueueBulkUpdate, Permission, CalibrationMode } from '../api/client';
+import type { PlateMetadata } from '../types/plates';
 import { Card } from '../components/Card';
+import { FilamentSwatch } from '../components/FilamentSwatch';
 import { Button } from '../components/Button';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { PrintModal } from '../components/PrintModal';
@@ -80,6 +83,80 @@ import { CompactHistoryRow } from '../components/CompactHistoryRow';
 import { QueueTimelineView } from '../components/QueueTimelineView';
 import { compareQueueOrder, compareQueueOrderAcrossLanes } from '../utils/queueOrder';
 import { BatchOrdersView } from '../components/BatchOrdersView';
+
+type QueueFilamentDisplay = {
+  slotId: number;
+  type: string;
+  color: string;
+  colorName: string;
+};
+
+/**
+ * Resolve the filament colours a queued job is actually configured to use.
+ *
+ * Plate metadata is the source of truth for which 3MF slots the selected plate
+ * consumes. A queue-level override replaces only its matching slot, so a
+ * multi-colour job can mix original 3MF colours and user-selected overrides
+ * without losing either (#3132).
+ */
+function resolveQueueFilaments(
+  item: PrintQueueItem,
+  plates: PlateMetadata[],
+): QueueFilamentDisplay[] {
+  const selectedPlate =
+    item.plate_id != null
+      ? plates.find((plate) => plate.index === item.plate_id)
+      : plates[0];
+
+  if (selectedPlate) {
+    const overrides = new Map(
+      (item.filament_overrides ?? []).map((override) => [override.slot_id, override]),
+    );
+
+    return selectedPlate.filaments
+      .filter((filament) => filament.used_in_plate !== false && filament.used_grams > 0)
+      .map((filament) => {
+        const override = overrides.get(filament.slot_id);
+        const color = override?.color ?? filament.color;
+        const type = override?.type ?? filament.type;
+
+        return {
+          slotId: filament.slot_id,
+          type,
+          color,
+          colorName: override?.color_name?.trim() || getColorName(color, type),
+        };
+      });
+  }
+
+  // The queue row can render before plate metadata arrives (or an old source
+  // may no longer expose it). Prefer explicit queue overrides in that gap,
+  // because they describe the user's intended colour rather than the slice.
+  if (item.filament_overrides?.length) {
+    return item.filament_overrides.map((override) => ({
+      slotId: override.slot_id,
+      type: override.type,
+      color: override.color,
+      colorName:
+        override.color_name?.trim() ||
+        getColorName(override.color, override.type),
+    }));
+  }
+
+  // Last-resort compatibility fallback for older/simpler queue responses.
+  if (item.filament_color) {
+    return [
+      {
+        slotId: 1,
+        type: item.filament_type ?? '',
+        color: item.filament_color,
+        colorName: getColorName(item.filament_color, item.filament_type),
+      },
+    ];
+  }
+
+  return [];
+}
 
 function formatWeight(g: number, useKg = false): string {
   if (useKg && g >= 1000) return `${(g / 1000).toFixed(1)}kg`;
@@ -432,6 +509,7 @@ function SortableQueueItem({
   // Combine plates data from either source
   const platesData = isLibraryFile ? libraryPlatesData : archivePlatesData;
   const plates = platesData?.plates ?? [];
+  const queueFilaments = resolveQueueFilaments(item, plates);
 
   const canReorder = hasPermission('queue:reorder');
   const {
@@ -657,6 +735,22 @@ function SortableQueueItem({
                 {formatWeight(item.filament_used_grams)}
               </span>
             )}
+            {queueFilaments.map((filament) => (
+              <span
+                key={`filament-${filament.slotId}`}
+                className="flex items-center gap-1 sm:gap-1.5 min-w-0"
+                title={filament.type ? `${filament.type} · ${filament.colorName}` : filament.colorName}
+              >
+                <FilamentSwatch
+                  rgba={filament.color}
+                  className="w-3 h-3 sm:w-3.5 sm:h-3.5"
+                  effectSize="table"
+                />
+                <span className="truncate max-w-[110px] sm:max-w-[160px]">
+                  {filament.colorName}
+                </span>
+              </span>
+            ))}
             {(() => {
               // Build plate badge so the user knows which plate to mount before
               // walking to the printer (#1281). Hidden when the 3MF doesn't
