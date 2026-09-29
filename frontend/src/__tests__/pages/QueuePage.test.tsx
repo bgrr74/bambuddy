@@ -633,6 +633,85 @@ describe('QueuePage', () => {
       });
     });
 
+    it('keeps an eight-colour job compact and exposes details in the tooltip (#3132)', async () => {
+      const colours = [
+        '#FF0000',
+        '#00FF00',
+        '#0000FF',
+        '#FFFF00',
+        '#FF00FF',
+        '#00FFFF',
+        '#FFFFFF',
+        '#000000',
+      ];
+      const item = {
+        ...mockQueueItems[0],
+        id: 87,
+        printer_id: null,
+        target_model: 'P2S',
+        archive_id: null,
+        library_file_id: 18,
+        archive_name: null,
+        library_file_name: 'Eight colour test',
+        plate_id: 1,
+        filament_overrides: colours.map((color, index) => ({
+          slot_id: index + 1,
+          type: 'PLA',
+          color,
+          color_name: `Colour ${index + 1}`,
+          force_color_match: false,
+        })),
+      };
+
+      server.use(
+        http.get('/api/v1/queue/', () => HttpResponse.json([item])),
+        http.get('/api/v1/library/files/18/plates', () =>
+          HttpResponse.json({
+            file_id: 18,
+            filename: 'eight-colour.3mf',
+            plates: [
+              {
+                index: 1,
+                name: 'Plate 1',
+                objects: ['Part'],
+                has_thumbnail: false,
+                thumbnail_url: null,
+                print_time_seconds: 3600,
+                filament_used_grams: 40,
+                filaments: colours.map((color, index) => ({
+                  slot_id: index + 1,
+                  type: 'PLA',
+                  color,
+                  used_grams: 5,
+                  used_meters: 1.7,
+                })),
+              },
+            ],
+            is_multi_plate: false,
+          }),
+        ),
+      );
+
+      render(<QueuePage />);
+
+      const name = await screen.findByText('Eight colour test');
+      const row = name.closest('.group');
+      expect(row).not.toBeNull();
+
+      await waitFor(() => {
+        const compact = within(row as HTMLElement).getByTestId('queue-filament-compact');
+        expect(compact).toHaveAttribute(
+          'title',
+          colours.map((_, index) => `Colour ${index + 1}`).join('\n'),
+        );
+        expect(within(compact).getAllByTestId('filament-swatch')).toHaveLength(8);
+      });
+
+      // Compact mode keeps the long labels out of the metadata row itself.
+      expect(within(row as HTMLElement).queryByText('Colour 1')).not.toBeInTheDocument();
+      expect(within(row as HTMLElement).queryByText('Colour 8')).not.toBeInTheDocument();
+    });
+
     it('shows one if-started-now ETA for an eligible pending item', async () => {
       // Printer 1 is free: nothing is printing on it and nothing is queued ahead.
       server.use(
