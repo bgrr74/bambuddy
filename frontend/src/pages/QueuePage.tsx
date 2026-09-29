@@ -817,7 +817,7 @@ function SortableQueueItem({
             {queueFilaments.length > 2 ? (
               <span
                 data-testid="queue-filament-compact"
-                className="flex items-center gap-1 flex-shrink-0"
+                className="flex items-center gap-0.5 flex-shrink-0"
                 title={queueFilaments.map(queueFilamentLabel).join('\n')}
               >
                 {queueFilaments.map((filament) => (
@@ -827,7 +827,7 @@ function SortableQueueItem({
                     extraColors={filament.extraColors}
                     effectType={filament.effectType}
                     subtype={filament.subtype}
-                    className="w-3 h-3 sm:w-3.5 sm:h-3.5 pointer-events-none"
+                    className="w-2.5 h-2.5 sm:w-3 sm:h-3 pointer-events-none"
                     effectSize="table"
                   />
                 ))}
