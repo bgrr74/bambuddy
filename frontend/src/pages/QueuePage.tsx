@@ -97,6 +97,16 @@ type QueueFilamentDisplay = {
   subtype?: string;
 };
 
+function queueFilamentLabel(filament: QueueFilamentDisplay): string {
+  return filament.slotLabel
+    ? [
+        filament.slotLabel,
+        filament.spoolName || filament.type,
+        filament.colorName,
+      ].filter(Boolean).join(' · ')
+    : filament.colorName;
+}
+
 /**
  * Resolve the filament colours a queued job is actually configured to use.
  *
@@ -804,34 +814,48 @@ function SortableQueueItem({
                 {formatWeight(item.filament_used_grams)}
               </span>
             )}
-            {queueFilaments.map((filament) => {
-              const mappedLabel = filament.slotLabel
-                ? [
-                    filament.slotLabel,
-                    filament.spoolName || filament.type,
-                    filament.colorName,
-                  ].filter(Boolean).join(' · ')
-                : filament.colorName;
-              return (
-                <span
-                  key={`filament-${filament.slotId}`}
-                  className="flex items-center gap-1 sm:gap-1.5 min-w-0"
-                  title={mappedLabel}
-                >
+            {queueFilaments.length > 2 ? (
+              <span
+                data-testid="queue-filament-compact"
+                className="flex items-center gap-1 flex-shrink-0"
+                title={queueFilaments.map(queueFilamentLabel).join('\n')}
+              >
+                {queueFilaments.map((filament) => (
                   <FilamentSwatch
+                    key={`filament-${filament.slotId}`}
                     rgba={filament.color}
                     extraColors={filament.extraColors}
                     effectType={filament.effectType}
                     subtype={filament.subtype}
-                    className="w-3 h-3 sm:w-3.5 sm:h-3.5"
+                    className="w-3 h-3 sm:w-3.5 sm:h-3.5 pointer-events-none"
                     effectSize="table"
                   />
-                  <span className="truncate max-w-[110px] sm:max-w-[260px]">
-                    {mappedLabel}
+                ))}
+              </span>
+            ) : (
+              queueFilaments.map((filament) => {
+                const mappedLabel = queueFilamentLabel(filament);
+                return (
+                  <span
+                    key={`filament-${filament.slotId}`}
+                    className="flex items-center gap-1 sm:gap-1.5 min-w-0"
+                    title={mappedLabel}
+                  >
+                    <FilamentSwatch
+                      rgba={filament.color}
+                      extraColors={filament.extraColors}
+                      effectType={filament.effectType}
+                      subtype={filament.subtype}
+                      className="w-3 h-3 sm:w-3.5 sm:h-3.5"
+                      effectSize="table"
+                    />
+                    <span className="truncate max-w-[110px] sm:max-w-[260px]">
+                      {mappedLabel}
+                    </span>
                   </span>
-                </span>
-              );
-            })}
+                );
+              })
+            )}
             {(() => {
               // Build plate badge so the user knows which plate to mount before
               // walking to the printer (#1281). Hidden when the 3MF doesn't
