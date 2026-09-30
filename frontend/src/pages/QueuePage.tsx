@@ -70,7 +70,7 @@ import { type TimeFormat, formatETA, formatDuration, formatRelativeTime, parseUT
 import { getBedTypeInfo } from '../utils/bedType';
 import { getColorName } from '../utils/colors';
 import type { PrintQueueItem, PrintQueueBulkUpdate, Permission, CalibrationMode, PrinterStatus, SlotSpoolIdentity } from '../api/client';
-import { formatSlotLabel } from '../utils/amsHelpers';
+import { formatSlotLabel, getEmptySlotKind } from '../utils/amsHelpers';
 import type { PlateMetadata } from '../types/plates';
 import { Card } from '../components/Card';
 import { FilamentSwatch } from '../components/FilamentSwatch';
@@ -105,24 +105,20 @@ type QueueFilamentDisplay = {
  *
  * The scheduler dispatches a stored mapping as-is, so a spool unloaded after
  * queueing leaves the job pointed at an empty slot. Returns undefined when the
- * status doesn't describe that slot (offline, still loading, unit removed) so
- * the card only warns on a positive finding.
+ * status doesn't describe that slot (offline, still loading, unit removed) or
+ * when the slot may still hold an unconfigured spool (a non-RFID spool has no
+ * tray_type either, #2527), so the card only warns on a positive finding.
  */
 function emptyMappedSlotLabel(status: PrinterStatus | undefined, trayId: number): string | undefined {
-  if (!status?.connected) return undefined;
-  if (trayId >= 254) {
-    const vtTrays = status.vt_tray ?? [];
-    const tray = vtTrays.find((vt) => (vt.id ?? 254) === trayId);
-    if (!tray || tray.tray_type) return undefined;
-    // Same labels as buildLoadedFilaments, which names a loaded external spool.
-    return vtTrays.length > 1 ? (trayId === 254 ? 'Ext-L' : 'Ext-R') : 'External';
-  }
+  // The external holder reports no presence signal (the status route sends
+  // vt_tray without state / exists), so its emptiness can't be confirmed.
+  if (!status?.connected || trayId >= 254) return undefined;
   const isHt = trayId >= 128;
   const amsId = isHt ? trayId : Math.floor(trayId / 4);
   const slot = isHt ? 0 : trayId % 4;
   const unit = status.ams?.find((ams) => ams.id === amsId);
   const tray = isHt ? unit?.tray[0] : unit?.tray.find((candidate) => candidate.id === slot);
-  if (!tray || tray.tray_type) return undefined;
+  if (getEmptySlotKind(tray) !== 'physical') return undefined;
   return formatSlotLabel(amsId, slot, isHt, false);
 }
 

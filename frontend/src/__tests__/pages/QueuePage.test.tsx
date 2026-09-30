@@ -787,7 +787,8 @@ describe('QueuePage', () => {
           tray: [
             { id: 0, tray_type: 'PLA', tray_color: 'FFFFFFFF', remain: 50 },
             { id: 1, tray_type: 'PLA', tray_color: 'C2BAA7FF', remain: 80 },
-            { id: 2, tray_type: null },
+            // Firmware confirms A3 has no spool (tray_exist_bits bit clear).
+            { id: 2, tray_type: null, exists: false, state: 9 },
             { id: 3, tray_type: null },
           ],
         },
@@ -825,17 +826,51 @@ describe('QueuePage', () => {
         expect(within(row).getByTestId('filament-swatch')).toHaveAttribute('title', '#8E351B');
       });
 
-      it('says an emptied external spool is empty', async () => {
-        useMappedPrinter([254], {
-          connected: true,
-          ams: [],
-          vt_tray: [{ id: 254, tray_type: '' }],
-        });
+      it('never calls the external spool empty, having no presence signal', async () => {
+        // Shape the status route really sends: an external tray carries no
+        // state / exists, so an unconfigured spool and no spool look the same.
+        let statusServed = false;
+        useMappedPrinter([254], { connected: true, ams: [], vt_tray: [] });
+        server.use(
+          http.get('/api/v1/printers/:id/status', () => {
+            statusServed = true;
+            return HttpResponse.json({ id: 1, name: 'Test Printer', state: 'IDLE', connected: true, ams: [], vt_tray: [{ id: 254, tray_type: '' }], nozzles: [], ams_extruder_map: {} });
+          }),
+        );
         const row = await mappedRow();
 
-        await waitFor(() => {
-          expect(within(row).getByText('External · Empty · Caramel')).toBeInTheDocument();
-        });
+        await waitFor(() => expect(statusServed).toBe(true));
+        expect(await within(row).findByText('Caramel')).toBeInTheDocument();
+        expect(within(row).queryByText(/Empty/)).not.toBeInTheDocument();
+      });
+
+      it('does not call a loaded but unconfigured spool empty (#2527)', async () => {
+        // A non-RFID spool the firmware can't identify has no tray_type but is
+        // physically present; the Printers page draws it as "?", not "Empty".
+        const ams = [
+          {
+            id: 0,
+            tray: [
+              { id: 0, tray_type: 'PLA', tray_color: 'FFFFFFFF', remain: 50 },
+              { id: 1, tray_type: 'PLA', tray_color: 'C2BAA7FF', remain: 80 },
+              { id: 2, tray_type: '', exists: true, state: 3 },
+              { id: 3, tray_type: null },
+            ],
+          },
+        ];
+        let statusServed = false;
+        useMappedPrinter([2], { connected: true, ams, vt_tray: [] });
+        server.use(
+          http.get('/api/v1/printers/:id/status', () => {
+            statusServed = true;
+            return HttpResponse.json({ id: 1, name: 'Test Printer', state: 'IDLE', connected: true, ams, vt_tray: [], nozzles: [], ams_extruder_map: {} });
+          }),
+        );
+        const row = await mappedRow();
+
+        await waitFor(() => expect(statusServed).toBe(true));
+        expect(await within(row).findByText('Caramel')).toBeInTheDocument();
+        expect(within(row).queryByText(/Empty/)).not.toBeInTheDocument();
       });
 
       it('does not call a slot empty while the printer is offline', async () => {
