@@ -706,10 +706,145 @@ describe('QueuePage', () => {
         );
         expect(within(compact).getAllByTestId('filament-swatch')).toHaveLength(8);
       });
+      // Touch screens never show the tooltip; the same lines are the group's
+      // accessible name.
+      expect(screen.getByRole('img', { name: /^Colour 1, Colour 2, .*Colour 8$/ })).toBe(
+        within(row as HTMLElement).getByTestId('queue-filament-compact'),
+      );
 
       // Compact mode keeps the long labels out of the metadata row itself.
       expect(within(row as HTMLElement).queryByText('Colour 1')).not.toBeInTheDocument();
       expect(within(row as HTMLElement).queryByText('Colour 8')).not.toBeInTheDocument();
+    });
+
+    describe('stored mapping on the live printer (#3132)', () => {
+      const mappedItem = (amsMapping: number[]) => ({
+        ...mockQueueItems[0],
+        id: 88,
+        printer_id: 1,
+        printer_name: 'Test Printer',
+        archive_id: null,
+        library_file_id: 19,
+        archive_name: null,
+        library_file_name: 'Mapped slot test',
+        plate_id: 1,
+        ams_mapping: amsMapping,
+        filament_overrides: [
+          {
+            slot_id: 1,
+            type: 'PLA',
+            color: '#8E351BFF',
+            color_name: 'Caramel',
+            force_color_match: false,
+          },
+        ],
+      });
+
+      const useMappedPrinter = (amsMapping: number[], status: Record<string, unknown>) => {
+        server.use(
+          http.get('/api/v1/queue/', () => HttpResponse.json([mappedItem(amsMapping)])),
+          http.get('/api/v1/library/files/19/plates', () =>
+            HttpResponse.json({
+              file_id: 19,
+              filename: 'mapped-slot.3mf',
+              plates: [
+                {
+                  index: 1,
+                  name: 'Plate 1',
+                  objects: ['Part'],
+                  has_thumbnail: false,
+                  thumbnail_url: null,
+                  print_time_seconds: 3600,
+                  filament_used_grams: 20,
+                  filaments: [
+                    { slot_id: 1, type: 'PLA', color: '#7C4B00', used_grams: 20, used_meters: 6.7 },
+                  ],
+                },
+              ],
+              is_multi_plate: false,
+            }),
+          ),
+          http.get('/api/v1/printers/:id/status', () =>
+            HttpResponse.json({
+              id: 1,
+              name: 'Test Printer',
+              state: 'IDLE',
+              nozzles: [],
+              ams_extruder_map: {},
+              ...status,
+            }),
+          ),
+          http.get('/api/v1/printers/:id/inventory-remain', () =>
+            HttpResponse.json({ inventory_remain_g: {}, slot_materials: [] }),
+          ),
+        );
+      };
+
+      // Regular AMS units expose four tray records; slot A3 (global 2) is empty.
+      const amsWithEmptyA3 = [
+        {
+          id: 0,
+          tray: [
+            { id: 0, tray_type: 'PLA', tray_color: 'FFFFFFFF', remain: 50 },
+            { id: 1, tray_type: 'PLA', tray_color: 'C2BAA7FF', remain: 80 },
+            { id: 2, tray_type: null },
+            { id: 3, tray_type: null },
+          ],
+        },
+      ];
+
+      const mappedRow = async () => {
+        render(<QueuePage />);
+        const name = await screen.findByText('Mapped slot test');
+        const row = name.closest('.group');
+        expect(row).not.toBeNull();
+        return row as HTMLElement;
+      };
+
+      it('resolves a mapping to the external spool', async () => {
+        useMappedPrinter([254], {
+          connected: true,
+          ams: [],
+          vt_tray: [{ id: 254, tray_type: 'PETG', tray_color: 'C2BAA7FF', remain: 60 }],
+        });
+        const row = await mappedRow();
+
+        await waitFor(() => {
+          expect(within(row).getByText(/^External · PETG · /)).toBeInTheDocument();
+        });
+        expect(within(row).queryByText('Caramel')).not.toBeInTheDocument();
+      });
+
+      it('says the mapped slot is empty, keeping the intended colour', async () => {
+        useMappedPrinter([2], { connected: true, ams: amsWithEmptyA3, vt_tray: [] });
+        const row = await mappedRow();
+
+        await waitFor(() => {
+          expect(within(row).getByText('A3 · Empty · Caramel')).toBeInTheDocument();
+        });
+        expect(within(row).getByTestId('filament-swatch')).toHaveAttribute('title', '#8E351B');
+      });
+
+      it('says an emptied external spool is empty', async () => {
+        useMappedPrinter([254], {
+          connected: true,
+          ams: [],
+          vt_tray: [{ id: 254, tray_type: '' }],
+        });
+        const row = await mappedRow();
+
+        await waitFor(() => {
+          expect(within(row).getByText('External · Empty · Caramel')).toBeInTheDocument();
+        });
+      });
+
+      it('does not call a slot empty while the printer is offline', async () => {
+        useMappedPrinter([2], { connected: false, ams: amsWithEmptyA3, vt_tray: [] });
+        const row = await mappedRow();
+
+        expect(await within(row).findByText('Caramel')).toBeInTheDocument();
+        expect(within(row).queryByText(/Empty/)).not.toBeInTheDocument();
+      });
     });
 
     it('shows one if-started-now ETA for an eligible pending item', async () => {

@@ -69,7 +69,8 @@ import { PipelineRunsView } from './PipelineRunsPage';
 import { type TimeFormat, formatETA, formatDuration, formatRelativeTime, parseUTCDate } from '../utils/date';
 import { getBedTypeInfo } from '../utils/bedType';
 import { getColorName } from '../utils/colors';
-import type { PrintQueueItem, PrintQueueBulkUpdate, Permission, CalibrationMode, SlotSpoolIdentity } from '../api/client';
+import type { PrintQueueItem, PrintQueueBulkUpdate, Permission, CalibrationMode, PrinterStatus, SlotSpoolIdentity } from '../api/client';
+import { formatSlotLabel } from '../utils/amsHelpers';
 import type { PlateMetadata } from '../types/plates';
 import { Card } from '../components/Card';
 import { FilamentSwatch } from '../components/FilamentSwatch';
@@ -95,7 +96,35 @@ type QueueFilamentDisplay = {
   extraColors?: string;
   effectType?: string;
   subtype?: string;
+  /** The stored mapping names a slot the printer reports as empty. */
+  emptySlot?: boolean;
 };
+
+/**
+ * Slot label for a mapped tray the printer positively reports as empty.
+ *
+ * The scheduler dispatches a stored mapping as-is, so a spool unloaded after
+ * queueing leaves the job pointed at an empty slot. Returns undefined when the
+ * status doesn't describe that slot (offline, still loading, unit removed) so
+ * the card only warns on a positive finding.
+ */
+function emptyMappedSlotLabel(status: PrinterStatus | undefined, trayId: number): string | undefined {
+  if (!status?.connected) return undefined;
+  if (trayId >= 254) {
+    const vtTrays = status.vt_tray ?? [];
+    const tray = vtTrays.find((vt) => (vt.id ?? 254) === trayId);
+    if (!tray || tray.tray_type) return undefined;
+    // Same labels as buildLoadedFilaments, which names a loaded external spool.
+    return vtTrays.length > 1 ? (trayId === 254 ? 'Ext-L' : 'Ext-R') : 'External';
+  }
+  const isHt = trayId >= 128;
+  const amsId = isHt ? trayId : Math.floor(trayId / 4);
+  const slot = isHt ? 0 : trayId % 4;
+  const unit = status.ams?.find((ams) => ams.id === amsId);
+  const tray = isHt ? unit?.tray[0] : unit?.tray.find((candidate) => candidate.id === slot);
+  if (!tray || tray.tray_type) return undefined;
+  return formatSlotLabel(amsId, slot, isHt, false);
+}
 
 function queueFilamentLabel(filament: QueueFilamentDisplay): string {
   return filament.slotLabel
@@ -119,24 +148,37 @@ function resolveQueueFilaments(
   item: PrintQueueItem,
   plates: PlateMetadata[],
   loadedFilaments: LoadedFilament[] = [],
+  status?: PrinterStatus,
+  emptyLabel = 'Empty',
 ): QueueFilamentDisplay[] {
-  const loadedForSlot = (slotId: number): LoadedFilament | undefined => {
+  // A stored AMS mapping names the physical tray that will actually feed a 3MF
+  // slot. Once its live tray data is available, that is more specific than
+  // either the queue override or the original slice. When the printer reports
+  // that tray as empty, keep the intended colour but say the slot is empty.
+  const resolveSlot = (planned: QueueFilamentDisplay): QueueFilamentDisplay => {
+    const slotId = planned.slotId;
     const mappedTrayId = slotId > 0 ? item.ams_mapping?.[slotId - 1] : undefined;
-    if (mappedTrayId == null || mappedTrayId < 0) return undefined;
-    return loadedFilaments.find((filament) => filament.globalTrayId === mappedTrayId);
+    if (mappedTrayId == null || mappedTrayId < 0) return planned;
+    const loaded = loadedFilaments.find((filament) => filament.globalTrayId === mappedTrayId);
+    if (loaded) {
+      return {
+        slotId,
+        type: loaded.type,
+        color: loaded.color,
+        colorName: loaded.colorName,
+        slotLabel: loaded.label,
+        spoolName: loaded.spoolName,
+        extraColors: loaded.extraColors,
+        effectType: loaded.effectType,
+        subtype: loaded.spoolSubtype,
+      };
+    }
+    const emptySlotLabel = emptyMappedSlotLabel(status, mappedTrayId);
+    if (emptySlotLabel) {
+      return { ...planned, slotLabel: emptySlotLabel, spoolName: emptyLabel, emptySlot: true };
+    }
+    return planned;
   };
-
-  const fromLoaded = (slotId: number, loaded: LoadedFilament): QueueFilamentDisplay => ({
-    slotId,
-    type: loaded.type,
-    color: loaded.color,
-    colorName: loaded.colorName,
-    slotLabel: loaded.label,
-    spoolName: loaded.spoolName,
-    extraColors: loaded.extraColors,
-    effectType: loaded.effectType,
-    subtype: loaded.spoolSubtype,
-  });
 
   const selectedPlate =
     item.plate_id != null
@@ -151,22 +193,16 @@ function resolveQueueFilaments(
     return selectedPlate.filaments
       .filter((filament) => filament.used_in_plate !== false && filament.used_grams > 0)
       .map((filament) => {
-        // A stored AMS mapping names the physical tray that will actually feed
-        // this 3MF slot. Once its live tray data is available, that is more
-        // specific than either the queue override or the original slice.
-        const loaded = loadedForSlot(filament.slot_id);
-        if (loaded) return fromLoaded(filament.slot_id, loaded);
-
         const override = overrides.get(filament.slot_id);
         const color = override?.color ?? filament.color;
         const type = override?.type ?? filament.type;
 
-        return {
+        return resolveSlot({
           slotId: filament.slot_id,
           type,
           color,
           colorName: override?.color_name?.trim() || getColorName(color, type),
-        };
+        });
       });
   }
 
@@ -174,31 +210,27 @@ function resolveQueueFilaments(
   // may no longer expose it). Prefer a resolved physical tray when possible,
   // then explicit queue overrides because they describe the user's intention.
   if (item.filament_overrides?.length) {
-    return item.filament_overrides.map((override) => {
-      const loaded = loadedForSlot(override.slot_id);
-      if (loaded) return fromLoaded(override.slot_id, loaded);
-      return {
+    return item.filament_overrides.map((override) =>
+      resolveSlot({
         slotId: override.slot_id,
         type: override.type,
         color: override.color,
         colorName:
           override.color_name?.trim() ||
           getColorName(override.color, override.type),
-      };
-    });
+      }),
+    );
   }
 
   // Last-resort compatibility fallback for older/simpler queue responses.
   if (item.filament_color) {
-    const loaded = loadedForSlot(1);
-    if (loaded) return [fromLoaded(1, loaded)];
     return [
-      {
+      resolveSlot({
         slotId: 1,
         type: item.filament_type ?? '',
         color: item.filament_color,
         colorName: getColorName(item.filament_color, item.filament_type),
-      },
+      }),
     ];
   }
 
@@ -588,7 +620,7 @@ function SortableQueueItem({
   // Combine plates data from either source
   const platesData = isLibraryFile ? libraryPlatesData : archivePlatesData;
   const plates = platesData?.plates ?? [];
-  const queueFilaments = resolveQueueFilaments(item, plates, loadedFilaments);
+  const queueFilaments = resolveQueueFilaments(item, plates, loadedFilaments, status, t('ams.empty'));
 
   const canReorder = hasPermission('queue:reorder');
   const {
@@ -819,6 +851,10 @@ function SortableQueueItem({
                 data-testid="queue-filament-compact"
                 className="flex items-center gap-0.5 flex-shrink-0"
                 title={queueFilaments.map(queueFilamentLabel).join('\n')}
+                // The tooltip needs a hover; touch screens and screen readers
+                // get the same lines through the accessible name instead.
+                role="img"
+                aria-label={queueFilaments.map(queueFilamentLabel).join(', ')}
               >
                 {queueFilaments.map((filament) => (
                   <FilamentSwatch
@@ -831,6 +867,12 @@ function SortableQueueItem({
                     effectSize="table"
                   />
                 ))}
+                {queueFilaments.some((filament) => filament.emptySlot) && (
+                  <AlertCircle
+                    className="w-3 h-3 ml-0.5 text-yellow-700 dark:text-yellow-400"
+                    aria-hidden="true"
+                  />
+                )}
               </span>
             ) : (
               queueFilaments.map((filament) => {
@@ -849,7 +891,11 @@ function SortableQueueItem({
                       className="w-3 h-3 sm:w-3.5 sm:h-3.5"
                       effectSize="table"
                     />
-                    <span className="truncate max-w-[110px] sm:max-w-[260px]">
+                    <span
+                      className={`truncate max-w-[110px] sm:max-w-[260px]${
+                        filament.emptySlot ? ' text-yellow-700 dark:text-yellow-400' : ''
+                      }`}
+                    >
                       {mappedLabel}
                     </span>
                   </span>
