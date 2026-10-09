@@ -62,6 +62,13 @@ function wrapper({ children }: { children: ReactNode }) {
 
 describe('ThemeContext', () => {
   beforeEach(() => {
+    // The global test setup uses no-op localStorage mocks. Give this
+    // suite a real in-memory store to verify persistence across mounts.
+    const storage = new Map<string, string>();
+    vi.mocked(localStorage.getItem).mockImplementation((key) => storage.get(key) ?? null);
+    vi.mocked(localStorage.setItem).mockImplementation((key, value) => { storage.set(key, value); });
+    vi.mocked(localStorage.removeItem).mockImplementation((key) => { storage.delete(key); });
+    vi.mocked(localStorage.clear).mockImplementation(() => { storage.clear(); });
     localStorage.clear();
     document.documentElement.className = '';
   });
