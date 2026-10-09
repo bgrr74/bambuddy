@@ -2848,7 +2848,7 @@ export default {
     progressInTitle: 'Afdrukvoortgang in tabblad',
     progressInTitleDescription: 'Toon de voortgang van de actieve print in het browsertabblad en favicon.',
     tabDisplay: 'Tabweergave',
-    tabDisplayPercentage: 'Percentage',
+    tabDisplayPercentage: 'In procenten',
     tabDisplayTime: 'Resterende tijd',
     // Archive
     autoArchivePrints: 'Afdrukken automatisch archiveren',
